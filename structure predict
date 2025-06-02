@@ -22,18 +22,18 @@ def predict_structure_from_spectrum(spectrum_file, model_path=None, output_file=
     """
     # Set default paths
     if model_path is None:
-        model_path = os.path.join(CURRENT_DIR, 'bidirectional_transformer_model13.pth')
+        model_path = os.path.join(CURRENT_DIR, 'bidirectional_transformer_model.pth')
     if output_file is None:
         output_file = os.path.join(CURRENT_DIR, 'predicted_structural_parameters.txt')
     
     # Load original spectrum data for normalization parameters
-    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum14200.txt')
+    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum.txt')
     spectrum_data = np.loadtxt(spectrum_path, dtype=str)
     wavelengths = spectrum_data[0].astype(float)
     spectrum_samples = spectrum_data[1:].astype(float)
     
     # Load original structural parameters for normalization and names
-    struct_path = os.path.join(CURRENT_DIR, 'struct14200.txt')
+    struct_path = os.path.join(CURRENT_DIR, 'struct.txt')
     struct_data = np.loadtxt(struct_path, dtype=str)
     struct_param_names = struct_data[0]
     struct_samples = struct_data[1:].astype(float)
