@@ -1,0 +1,205 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+import os
+
+torch.manual_seed(42)
+np.random.seed(42)
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+class SharedTransformerEncoder(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+    def forward(self, src):
+        return self.transformer_encoder(src)
+
+class BidirectionalTransformer(nn.Module):
+    def __init__(self, struct_dim, spectrum_dim, d_model=64, nhead=4, num_layers=4, dim_feedforward=256):
+        super().__init__()
+        self.shared_encoder = SharedTransformerEncoder(d_model, nhead, num_layers, dim_feedforward)
+        self.struct_embedding = nn.Linear(struct_dim, d_model)
+        self.spectrum_output = nn.Linear(d_model, spectrum_dim)
+        self.spectrum_embedding = nn.Linear(spectrum_dim, d_model)
+        self.struct_output = nn.Linear(d_model, struct_dim)
+        
+    def forward_model(self, struct_params):
+        x = self.struct_embedding(struct_params).unsqueeze(0)
+        x = self.shared_encoder(x).squeeze(0)
+        return self.spectrum_output(x)
+    
+    def reverse_model(self, spectrum):
+        x = self.spectrum_embedding(spectrum).unsqueeze(0)
+        x = self.shared_encoder(x).squeeze(0)
+        return self.struct_output(x)
+    
+    def forward(self, struct_params=None, spectrum=None, direction='forward'):
+        if direction == 'forward' and struct_params is not None:
+            return self.forward_model(struct_params)
+        elif direction == 'reverse' and spectrum is not None:
+            return self.reverse_model(spectrum)
+        else:
+            raise ValueError("Invalid input or direction")
+
+class SpectralStructDataset(Dataset):
+    def __init__(self, spectrum_data, struct_data):
+        self.spectrum_data = torch.FloatTensor(spectrum_data)
+        self.struct_data = torch.FloatTensor(struct_data)
+        
+    def __len__(self):
+        return len(self.spectrum_data)
+    
+    def __getitem__(self, idx):
+        return self.spectrum_data[idx], self.struct_data[idx]
+
+def load_and_preprocess_data():
+    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum14200.txt')
+    spectrum_data = np.loadtxt(spectrum_path, dtype=str)
+    wavelengths = spectrum_data[0].astype(float)
+    spectrum_samples = spectrum_data[1:].astype(float)
+    
+    struct_path = os.path.join(CURRENT_DIR, 'struct14200.txt')
+    struct_data = np.loadtxt(struct_path, dtype=str)
+    struct_param_names = struct_data[0]
+    struct_samples = struct_data[1:].astype(float)
+    
+    spectrum_scaler = MinMaxScaler()
+    struct_scaler = MinMaxScaler()
+    normalized_spectrum = spectrum_scaler.fit_transform(spectrum_samples)
+    normalized_struct = struct_scaler.fit_transform(struct_samples)
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        normalized_spectrum, normalized_struct, test_size=0.2, random_state=42
+    )
+    
+    return (X_train, y_train, X_val, y_val, wavelengths, 
+            struct_param_names, spectrum_scaler, struct_scaler)
+
+def weighted_struct_mse_loss(pred, target):
+    weights = torch.ones_like(target)
+    weights[:, -2:] = 2.0
+    return torch.mean((pred - target) ** 2 * weights)
+
+def weighted_spectrum_mse_loss(pred, target):
+    weights = torch.ones_like(target)
+    weights[target > 0.8] = 3.0
+    weights[target > 0.9] = 6.0
+    return torch.mean((pred - target) ** 2 * weights)
+
+def train_model(model, train_loader, val_loader, epochs=500, lr=0.001, patience=50, min_delta=0.00001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    train_losses, val_losses = [], []
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+        for spectrum_batch, struct_batch in train_loader:
+            spectrum_batch, struct_batch = spectrum_batch.to(device), struct_batch.to(device)
+            
+            optimizer.zero_grad()
+            pred_spectrum = model(struct_params=struct_batch, direction='forward')
+            forward_loss = weighted_spectrum_mse_loss(pred_spectrum, spectrum_batch)
+            
+            pred_struct = model(spectrum=spectrum_batch, direction='reverse')
+            reverse_loss = weighted_struct_mse_loss(pred_struct, struct_batch)
+            
+            cycle_struct = model(spectrum=pred_spectrum, direction='reverse')
+            cycle_struct_loss = weighted_struct_mse_loss(cycle_struct, struct_batch)
+            
+            cycle_spectrum = model(struct_params=pred_struct, direction='forward')
+            cycle_spectrum_loss = weighted_spectrum_mse_loss(cycle_spectrum, spectrum_batch)
+            
+            total_loss = forward_loss + reverse_loss + 0.5 * (cycle_struct_loss + cycle_spectrum_loss)
+            total_loss.backward()
+            optimizer.step()
+            train_loss += total_loss.item()
+        
+        train_losses.append(train_loss / len(train_loader))
+        
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for spectrum_batch, struct_batch in val_loader:
+                spectrum_batch, struct_batch = spectrum_batch.to(device), struct_batch.to(device)
+                pred_spectrum = model(struct_params=struct_batch, direction='forward')
+                pred_struct = model(spectrum=spectrum_batch, direction='reverse')
+                val_loss += (weighted_spectrum_mse_loss(pred_spectrum, spectrum_batch) + 
+                            weighted_struct_mse_loss(pred_struct, struct_batch)).item()
+        
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+        
+        if val_loss < best_val_loss - min_delta:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict().copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch {epoch+1}/{epochs}, Train Loss: {train_losses[-1]:.6f}, Val Loss: {val_loss:.6f}')
+            
+        if patience_counter >= patience:
+            print(f'Early stopping at epoch {epoch+1}')
+            model.load_state_dict(best_model_state)
+            break
+            
+    return train_losses, val_losses, best_val_loss
+
+def predict_structure(model, spectrum_data, spectrum_scaler, struct_scaler):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    
+    if spectrum_data.ndim == 1:
+        spectrum_data = spectrum_data.reshape(1, -1)
+    
+    normalized_spectrum = spectrum_scaler.transform(spectrum_data)
+    spectrum_tensor = torch.FloatTensor(normalized_spectrum).to(device)
+    
+    with torch.no_grad():
+        predicted_struct = model(spectrum=spectrum_tensor, direction='reverse').cpu().numpy()
+    
+    return struct_scaler.inverse_transform(predicted_struct)
+
+def main():
+    data = load_and_preprocess_data()
+    X_train, y_train, X_val, y_val, _, struct_param_names, spectrum_scaler, struct_scaler = data
+    
+    train_dataset = SpectralStructDataset(X_train, y_train)
+    val_dataset = SpectralStructDataset(X_val, y_val)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64)
+    
+    model = BidirectionalTransformer(
+        struct_dim=y_train.shape[1], 
+        spectrum_dim=X_train.shape[1], 
+        num_layers=4
+    )
+    
+    print("Training model...")
+    losses = train_model(model, train_loader, val_loader)
+    
+    model_path = os.path.join(CURRENT_DIR, 'bidirectional_transformer_model.pth')
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'struct_param_names': struct_param_names,
+        'spectrum_scaler': spectrum_scaler,
+        'struct_scaler': struct_scaler
+    }, model_path)
+    print(f"Model saved to '{model_path}'")
+
+if __name__ == "__main__":
+    main()
