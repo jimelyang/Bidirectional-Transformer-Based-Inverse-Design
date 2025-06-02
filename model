@@ -61,12 +61,12 @@ class SpectralStructDataset(Dataset):
         return self.spectrum_data[idx], self.struct_data[idx]
 
 def load_and_preprocess_data():
-    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum14200.txt')
+    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum.txt')
     spectrum_data = np.loadtxt(spectrum_path, dtype=str)
     wavelengths = spectrum_data[0].astype(float)
     spectrum_samples = spectrum_data[1:].astype(float)
     
-    struct_path = os.path.join(CURRENT_DIR, 'struct14200.txt')
+    struct_path = os.path.join(CURRENT_DIR, 'struct.txt')
     struct_data = np.loadtxt(struct_path, dtype=str)
     struct_param_names = struct_data[0]
     struct_samples = struct_data[1:].astype(float)
