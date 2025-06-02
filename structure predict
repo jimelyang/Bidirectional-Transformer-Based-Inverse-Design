@@ -1,0 +1,128 @@
+import numpy as np
+import torch
+import os
+from bidirectional_transformer_with_extra_sample import BidirectionalTransformer
+from sklearn.preprocessing import MinMaxScaler
+
+# Get absolute path of current directory
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def predict_structure_from_spectrum(spectrum_file, model_path=None, output_file=None):
+    """
+    Predict structural parameters from spectrum data
+    
+    Args:
+        spectrum_file: Path to spectrum data file
+        model_path: Path to model weights file (default path used if None)
+        output_file: Path to output results file (default path used if None)
+    
+    Returns:
+        predicted_struct: Predicted structural parameters (numpy array)
+        struct_param_names: List of structural parameter names
+    """
+    # Set default paths
+    if model_path is None:
+        model_path = os.path.join(CURRENT_DIR, 'bidirectional_transformer_model13.pth')
+    if output_file is None:
+        output_file = os.path.join(CURRENT_DIR, 'predicted_structural_parameters.txt')
+    
+    # Load original spectrum data for normalization parameters
+    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum14200.txt')
+    spectrum_data = np.loadtxt(spectrum_path, dtype=str)
+    wavelengths = spectrum_data[0].astype(float)
+    spectrum_samples = spectrum_data[1:].astype(float)
+    
+    # Load original structural parameters for normalization and names
+    struct_path = os.path.join(CURRENT_DIR, 'struct14200.txt')
+    struct_data = np.loadtxt(struct_path, dtype=str)
+    struct_param_names = struct_data[0]
+    struct_samples = struct_data[1:].astype(float)
+    
+    # Create scalers
+    spectrum_scaler = MinMaxScaler()
+    struct_scaler = MinMaxScaler()
+    
+    # Fit scalers with original data
+    spectrum_scaler.fit(spectrum_samples)
+    struct_scaler.fit(struct_samples)
+    
+    # Load spectrum data for prediction
+    try:
+        predict_data = np.loadtxt(spectrum_file, dtype=str)
+        wavelengths_pred = predict_data[0].astype(float)
+        spectrum_to_predict = predict_data[1:].astype(float)
+    except Exception as e:
+        print(f"Error loading spectrum data: {e}")
+        return None, None
+    
+    # Create model instance
+    spectrum_dim = spectrum_samples.shape[1]
+    struct_dim = struct_samples.shape[1]
+    model = BidirectionalTransformer(struct_dim=struct_dim, spectrum_dim=spectrum_dim, num_layers=4)
+    
+    # Load model weights
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print("Model weights loaded successfully")
+    except Exception as e:
+        print(f"Error loading model weights: {e}")
+        print("Attempting non-strict mode loading...")
+        model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+        print("Model weights loaded successfully in non-strict mode")
+    
+    model.to(device)
+    model.eval()
+    
+    # Predict structural parameters
+    # Ensure correct data shape and normalization
+    if spectrum_to_predict.ndim == 1:
+        spectrum_to_predict = spectrum_to_predict.reshape(1, -1)
+    
+    # Apply same scaling as training data
+    normalized_spectrum = spectrum_scaler.transform(spectrum_to_predict)
+    spectrum_tensor = torch.FloatTensor(normalized_spectrum).to(device)
+    
+    # Predict
+    with torch.no_grad():
+        predicted_struct_normalized = model(spectrum=spectrum_tensor, direction='reverse')
+    
+    # Inverse transform to get actual values
+    predicted_struct = struct_scaler.inverse_transform(predicted_struct_normalized.cpu().numpy())
+    
+    # Output prediction results
+    print("\nPrediction results:")
+    for sample_idx, sample in enumerate(predicted_struct):
+        print(f"\nSample {sample_idx + 1} results:")
+        for i, param_name in enumerate(struct_param_names):
+            print(f"{param_name}: {sample[i]}")
+    
+    # Save results to file
+    np.savetxt(output_file, predicted_struct, header=' '.join(struct_param_names))
+    print(f"Results saved to '{output_file}'")
+    
+    return predicted_struct, struct_param_names
+
+def main():
+    """Main function to demonstrate prediction usage"""
+    # Default prediction data
+    spectrum_file = os.path.join(CURRENT_DIR, 'predict spectrum.txt')
+    
+    # Process command line arguments
+    import sys
+    if len(sys.argv) > 1:
+        spectrum_file = sys.argv[1]
+    
+    # Optional output file specification
+    output_file = None
+    if len(sys.argv) > 2:
+        output_file = sys.argv[2]
+    
+    print(f"Using spectrum file: {spectrum_file} for structural parameter prediction")
+    predicted_struct, struct_param_names = predict_structure_from_spectrum(spectrum_file, output_file=output_file)
+    
+    if predicted_struct is not None:
+        print("\nPrediction completed!")
+
+if __name__ == "__main__":
+    main()
