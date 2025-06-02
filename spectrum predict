@@ -1,0 +1,150 @@
+import numpy as np
+import torch
+import os
+import matplotlib.pyplot as plt
+from bidirectional_transformer_with_extra_sample import BidirectionalTransformer
+
+# Get absolute path of current directory
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def load_model_and_data():
+    """Load model and data"""
+    # Load original spectrum data for wavelengths and normalization parameters
+    spectrum_path = os.path.join(CURRENT_DIR, 'spectrum.txt')
+    spectrum_data = np.loadtxt(spectrum_path, dtype=str)
+    wavelengths = spectrum_data[0].astype(float)
+    spectrum_samples = spectrum_data[1:].astype(float)
+    
+    # Load original structural parameters for normalization
+    struct_path = os.path.join(CURRENT_DIR, 'struct.txt')
+    struct_data = np.loadtxt(struct_path, dtype=str)
+    struct_param_names = struct_data[0]
+    struct_samples = struct_data[1:].astype(float)
+    
+    # Load predicted structural parameters
+    predicted_struct_path = os.path.join(CURRENT_DIR, 'predicted_structural_parameters.txt')
+    predicted_struct_data = np.loadtxt(predicted_struct_path, dtype=str)
+    predicted_param_names = predicted_struct_data[0]
+    predicted_struct = predicted_struct_data[1:].astype(float)
+    
+    # Ensure structural parameters are 2D array
+    if predicted_struct.ndim == 1:
+        predicted_struct = predicted_struct.reshape(1, -1)
+    
+    # Create scalers
+    from sklearn.preprocessing import MinMaxScaler
+    spectrum_scaler = MinMaxScaler()
+    struct_scaler = MinMaxScaler()
+    
+    # Fit scalers with original data
+    spectrum_scaler.fit(spectrum_samples)
+    struct_scaler.fit(struct_samples)
+    
+    # Load model
+    model_path = os.path.join(CURRENT_DIR, 'bidirectional_transformer_model.pth')
+    
+    # Create model instance
+    spectrum_dim = spectrum_samples.shape[1]
+    struct_dim = struct_samples.shape[1]
+    model = BidirectionalTransformer(struct_dim=struct_dim, spectrum_dim=spectrum_dim, num_layers=4)
+    
+    # Load model weights
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print("Model weights loaded successfully")
+    except Exception as e:
+        print(f"Error loading model weights: {e}")
+        print("Attempting non-strict mode loading...")
+        model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+        print("Model weights loaded successfully in non-strict mode")
+    
+    model.to(device)
+    model.eval()
+    
+    return model, wavelengths, predicted_struct, spectrum_scaler, struct_scaler, device, struct_param_names
+
+def predict_spectrum(model, struct_data, struct_scaler, spectrum_scaler, device):
+    """Predict spectrum from structural parameters"""
+    # Ensure data is 2D
+    if struct_data.ndim == 1:
+        struct_data = struct_data.reshape(1, -1)
+        
+    # Normalize structural parameters
+    normalized_struct = struct_scaler.transform(struct_data)
+    struct_tensor = torch.FloatTensor(normalized_struct).to(device)
+    
+    # Predict spectrum
+    with torch.no_grad():
+        predicted_spectrum_normalized = model(struct_params=struct_tensor, direction='forward')
+    
+    # Inverse transform to get actual values
+    predicted_spectrum = spectrum_scaler.inverse_transform(predicted_spectrum_normalized.cpu().numpy())
+    
+    return predicted_spectrum
+
+def main():
+    print("Loading model and data...")
+    model, wavelengths, predicted_struct, spectrum_scaler, struct_scaler, device, struct_param_names = load_model_and_data()
+    
+    print("Predicting spectrum using structural parameters...")
+    predicted_spectrum = predict_spectrum(model, predicted_struct, struct_scaler, spectrum_scaler, device)
+    
+    # Save predicted spectrum data
+    output_path = os.path.join(CURRENT_DIR, 'predicted_spectrum.txt')
+    output_data = np.vstack((wavelengths, predicted_spectrum))
+    np.savetxt(output_path, output_data, fmt='%.6f')
+    print(f"Predicted spectrum data saved to '{output_path}'")
+    
+    # Output structural parameter values used
+    print("\nStructural parameters used for prediction:")
+    for sample_idx, sample in enumerate(predicted_struct):
+        print(f"\nSample {sample_idx + 1} parameters:")
+        for i, param_name in enumerate(struct_param_names):
+            print(f"{param_name}: {sample[i]}")
+    
+    # Try loading original spectrum data for comparison
+    try:
+        original_predict_path = os.path.join(CURRENT_DIR, 'predict spectrum.txt')
+        original_data = np.loadtxt(original_predict_path, dtype=str)
+        original_wavelengths = original_data[0].astype(float)
+        original_spectrum = original_data[1:].astype(float)
+        
+        # Generate individual comparison plots per sample
+        for i, spectrum in enumerate(predicted_spectrum):
+            if i < len(original_spectrum):
+                plt.figure(figsize=(12, 6))
+                plt.plot(wavelengths, spectrum, 'b-', linewidth=2, label='Predicted spectrum from parameters')
+                plt.plot(original_wavelengths, original_spectrum[i], 'r--', linewidth=1.5, label='Original spectrum')
+                
+                plt.xlabel('Wavelength (nm)')
+                plt.ylabel('Absorption')
+                plt.title(f'Sample {i+1}: Predicted vs Original Spectrum')
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(CURRENT_DIR, f'spectrum_comparison_sample_{i+1}.png'))
+                plt.close()
+            
+        # Generate combined plot for all samples
+        plt.figure(figsize=(15, 8))
+        for i, spectrum in enumerate(predicted_spectrum):
+            plt.plot(wavelengths, spectrum, '-', linewidth=1.5, label=f'Predicted {i+1}')
+        
+        for i, spectrum in enumerate(original_spectrum):
+            if i < len(predicted_spectrum):
+                plt.plot(original_wavelengths, spectrum, '--', linewidth=1, label=f'Original {i+1}')
+        
+        plt.xlabel('Wavelength (nm)')
+        plt.ylabel('Absorption')
+        plt.title('All Samples: Predicted vs Original Spectra')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(CURRENT_DIR, 'all_samples_comparison.png'))
+        plt.close()
+        
+        print(f"Spectrum comparison plots generated")
+    except Exception as e:
+        print(f"Error loading original spectrum data or generating plots: {e}")
+
+if __name__ == "__main__":
+    main()
